@@ -1,0 +1,12 @@
+# Use this file to create a conda environment for this pipeline:
+#   conda env create -f environment.yml
+
+name: synapse-nextflow
+channels:
+  - bioconda
+dependencies:
+  - pandas
+  - boto3
+  ## bioconda packages, see above
+  - synapseclient=2.2.2
+  
