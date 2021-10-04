@@ -6,8 +6,8 @@
 ========================================================================================
 */
 
-params.synid = "syn26240435"
-params.synapse_config = "~/.synapseConfig"
+nextflow.enable.dsl=2
+params.synid = "syn26240435.txt"
 params.outdir = "./"
 params.results_dir = "samplesheet"
 params.strandedness = "reverse"
@@ -24,49 +24,92 @@ process SYNAPSE_LIST {
 
     input:
     val synid
-    file synapseconfig
 
     output:
-    path "*.synlist.csv", emit synlist_csv
+    path "*.synlist.csv", emit: synlist_csv
 
     script:
     """
-    synapse -c $synapseconfig list $synid > ${synid}.synlist.csv
+    synapse list -l $synid | cut -c-11 > ${synid}.synlist.csv
     """
 }
 
 // Download FASTQ files by Synapse ID
-process DOWNLOAD_SYNID {
+process SYNAPSE_GET {
     publishDir "${params.outdir}/fastq/"
 
     input:
-    tuple (synapseID, fileName)
-    file synapseconfig
+    val(synapseID)
 
     output:
-    path "*", emit fastq
+    path "*", emit: fastq
 
     script:
     """
-    synapse -c $synapseconfig get $synapseID
+    synapse get $synapseID
     """
 }
 
-// Generate Samplesheet from Read Pairs
-process READ_PAIRS_TO_SAMPLESHEET {
+// Download metadata by Synapse ID
+process SYNAPSE_SHOW {
+    publishDir "${params.outdir}/synapse/"
 
     input:
-    set id, files
+    val(synapseID)
+
+    output:
+    path "*.metadata.txt", emit: metadata
+
+    script:
+    """
+    synapse show $synapseID | sed -n '1,3p;15,16p;20p;23p' > ${synapseID}.metadata.txt
+    """
+}
+
+process READ_PAIRS_TO_SAMPLESHEET {
+    publishDir "${params.outdir}/samplesheet/"
+
+    input:
+    tuple val(id), val(files)
     val strandedness
 
-    exec:
-    // Split read channel to corresponding files
-    (id, fastq_1, fastq_2) = [id, files[0].getBaseName(), files[1].getBaseName()]
+    output:
+    path("*samplesheet.csv"), emit: samplesheet
 
-    // Generate samplesheet
-    File file = new File("${params.outdir}/${params.results_dir}/samplesheet.txt")
-    file.write "Sample, Read_1, Read_2, Standedness\n"
-    file.append "$id, ${params.outdir}/${params.results_dir}/${fastq_1}, ${params.outdir}/${params.results_dir}/${fastq_2}, $strandedness\n"
+    exec:
+    // Add relevant fields to the beginning of the map
+    pipeline_map = [
+        sample  : "${id}",
+        fastq_1 : "${params.outdir}/${params.results_dir}/${files[0].getBaseName()}",
+        fastq_2 : "${params.outdir}/${params.results_dir}/${files[1].getBaseName()}"
+    ]
+    // Add Strandedness
+    pipeline_map << [ strandedness: "${strandedness}" ]
+    
+    // Create Samplesheet
+    samplesheet  = pipeline_map.keySet().collect{ '"' + it + '"'}.join(",") + '\n'
+    samplesheet += pipeline_map.values().collect{ '"' + it + '"'}.join(",")
+
+    def samplesheet_file2 = task.workDir.resolve("${pipeline_map.sample}.samplesheet.csv")
+    samplesheet_file2.text = samplesheet
+}
+
+process MERGE_SAMPLESHEET {
+    publishDir "${params.outdir}"
+
+    input:
+    path ('samplesheets/*')
+
+    output:
+    path "samplesheet.csv", emit: samplesheet
+
+    script:
+    """
+    head -n 1 `ls ./samplesheets/* | head -n 1` > samplesheet.csv
+    for fileid in `ls ./samplesheets/*`; do
+        awk 'NR>1' \$fileid >> samplesheet.csv
+    done
+    """
 }
 
 /*
@@ -91,30 +134,25 @@ Channel
 
 workflow {
 
-    // Download CSV of Synapse IDs and FQ File Names
     SYNAPSE_LIST (
         ch_ids,
-        ch_synapse_config
     )
 
     // Create channel for FQ SynapseIDs
     SYNAPSE_LIST
         .out
         .synlist_csv
-        .splitCsv(header:false)
-        .map{ row-> tuple(row.synapseId, row.fileName) }
+        .splitCsv(header:false, strip:true).flatten()
         .set { ch_samples }
 
     // Download FQ Files by SynapseID
-    DOWNLOAD_SYNID(
+    SYNAPSE_GET(
         ch_samples,
-        ch_synapse_config
     )
 
     // Create Read Pairs Channel
-    DOWNLOAD_SYNID
+    SYNAPSE_GET
         .out
-        .fastq
         .collect().flatten()
         .toSortedList().flatten()
         .map { meta ->  
@@ -124,9 +162,25 @@ workflow {
         .groupTuple()
         .set{ ch_read_pairs }
 
+    // Download FQ Metadata by SynapseID
+    SYNAPSE_SHOW(
+        ch_samples,
+    )
+
+    // Clean Metadata
+    SYNAPSE_SHOW
+        .out
+        .metadata
+        .splitCsv()
+
     // Create Samplesheet
     READ_PAIRS_TO_SAMPLESHEET(
         ch_read_pairs,
         params.strandedness
+    )
+
+    // Merge Samplesheets
+    MERGE_SAMPLESHEET (
+        READ_PAIRS_TO_SAMPLESHEET.out.samplesheet.collect()
     )
 }
