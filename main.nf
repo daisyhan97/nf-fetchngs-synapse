@@ -66,6 +66,7 @@ process SYNAPSE_SHOW {
     """
 }
 
+// Produce mapping for samplesheet output
 process READ_PAIRS_TO_SAMPLESHEET {
     publishDir "${params.outdir}/samplesheet/"
 
@@ -94,20 +95,55 @@ process READ_PAIRS_TO_SAMPLESHEET {
     samplesheet_file2.text = samplesheet
 }
 
+// Produce mapping for metadata output
+process METADATA_TO_METAMAP {
+    publishDir "${params.outdir}/metadata/"
+    input: 
+    val data
+
+    output:
+    path("*metasheet.csv"), emit: metasheet
+
+    exec:
+    meta_map = [
+        md5         : "${data[0]}",
+        fileSize    : "${data[1]}",
+        etag        : "${data[2]}",
+        id          : "${data[3]}",
+        fileName    : "${data[4]}",
+        fileVersion : "${data[5]}"
+    ]
+
+    // Create Metadata Sheet
+    metasheet  = meta_map.keySet().collect{ '"' + it + '"'}.join(",") + '\n'
+    metasheet += meta_map.values().collect{ '"' + it + '"'}.join(",")
+
+    def metasheet_file = task.workDir.resolve("${meta_map.id}.metasheet.csv")
+    metasheet_file.text = metasheet
+}
+
+// Merge samplesheet outputs and metadata outputs
 process MERGE_SAMPLESHEET {
     publishDir "${params.outdir}"
 
     input:
     path ('samplesheets/*')
+    path ('metasheet/*')
 
     output:
     path "samplesheet.csv", emit: samplesheet
+    path "metasheet.csv", emit: metasheet
 
     script:
     """
     head -n 1 `ls ./samplesheets/* | head -n 1` > samplesheet.csv
     for fileid in `ls ./samplesheets/*`; do
         awk 'NR>1' \$fileid >> samplesheet.csv
+    done
+
+    head -n 1 `ls ./metasheet/* | head -n 1` > metasheet.csv
+    for fileid in `ls ./metasheet/*`; do
+        awk 'NR>1' \$fileid >> metasheet.csv
     done
     """
 }
@@ -171,7 +207,15 @@ workflow {
     SYNAPSE_SHOW
         .out
         .metadata
-        .splitCsv()
+        .splitCsv(strip:true, sep:"=", skip:1)
+        .map { it[1] }
+        .collate( 6 )
+        .set { ch_meta }
+
+    // Compile Metadata
+    METADATA_TO_METAMAP (
+        ch_meta
+    )
 
     // Create Samplesheet
     READ_PAIRS_TO_SAMPLESHEET(
@@ -179,8 +223,9 @@ workflow {
         params.strandedness
     )
 
-    // Merge Samplesheets
+    // Merge Samplesheets and Metadata Outputs
     MERGE_SAMPLESHEET (
-        READ_PAIRS_TO_SAMPLESHEET.out.samplesheet.collect()
+        READ_PAIRS_TO_SAMPLESHEET.out.samplesheet.collect(),
+        METADATA_TO_METAMAP.out.metasheet.collect()
     )
 }
